@@ -103,14 +103,17 @@ def preprocess_text(text):
     return ' '.join(tokens)
 
 # Twitter API
-bearer_token = st.secrets["TWITTER_BEARER_TOKEN"]
+#bearer_token = st.secrets["TWITTER_BEARER_TOKEN"]
+bearer_token = st.secrets.get("TWITTER_BEARER_TOKEN", "")
 
 # Reddit API
-reddit_client_id = st.secrets["REDDIT_CLIENT_ID"]
-reddit_client_secret = st.secrets["REDDIT_CLIENT_SECRET"]
+reddit_client_id = st.secrets.get("REDDIT_CLIENT_ID", "")
+reddit_client_secret = st.secrets.get("REDDIT_CLIENT_SECRET", "")
 
 # NewsAPI
-newsapi_key = st.secrets["NEWSAPI_KEY"]
+newsapi_key = st.secrets.get("NEWSAPI_KEY", "")
+
+api_keys_configured = any([bearer_token, reddit_client_id, newsapi_key])
 # Load or train model
 @st.cache_resource
 def load_or_train_model():
@@ -803,10 +806,10 @@ def create_dashboard_overview(metrics, alerts):
             # Safe way to verify keys are loaded without exposing them
 try:
     keys_loaded = all([
-        st.secrets.get("TWITTER_BEARER_TOKEN"),
-        st.secrets.get("REDDIT_CLIENT_ID"), 
-        st.secrets.get("REDDIT_CLIENT_SECRET"),
-        st.secrets.get("NEWSAPI_KEY")
+        st.secrets.get("TWITTER_BEARER_TOKEN",""),
+        st.secrets.get("REDDIT_CLIENT_ID",""), 
+        st.secrets.get("REDDIT_CLIENT_SECRET",""),
+        st.secrets.get("NEWSAPI_KEY","")
     ])
     
     if keys_loaded:
@@ -815,6 +818,12 @@ try:
         st.sidebar.warning("⚠️ Some API keys are missing")
         
 except Exception as e:
+    bearer_token = ""
+    reddit_client_id = ""
+    reddit_client_secret = ""
+    newsapi_key = ""
+    api_keys_configured = False
+    st.sidebar.warning("⚠️ API configuration loaded with fallbacks")
     st.sidebar.error("❌ Error loading API keys")
     
     def safe_debug_info():
