@@ -59,3 +59,4 @@ newsapi-python==0.2.7
 wordcloud==1.9.3
 textblob==0.17.1
 emoji==2.8.0
+openpyxl==3.1.2

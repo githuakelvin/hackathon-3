@@ -18,12 +18,18 @@ import plotly.express as px
 from textblob import TextBlob
 import joblib
 import warnings
+import json
+import io
+import openpyxl
+from pathlib import Path
+import traceback
 warnings.filterwarnings('ignore')
 
-# Download NLTK resources
+# NLTK Setup with proper error handling - PUT THIS AT THE VERY TOP
 import nltk
 import ssl
 
+# Fix SSL issues
 try:
     _create_unverified_https_context = ssl._create_unverified_context
 except AttributeError:
@@ -31,17 +37,24 @@ except AttributeError:
 else:
     ssl._create_default_https_context = _create_unverified_https_context
 
-# List of required NLTK datasets
-nltk_datasets = ['punkt', 'stopwords', 'wordnet', 'punkt_tab']
+# Download required NLTK datasets with robust error handling
+def download_nltk_data():
+    datasets = ['punkt', 'stopwords', 'wordnet', 'averaged_perceptron_tagger', 'omw-1.4']
+    
+    for dataset in datasets:
+        try:
+            nltk.data.find(f'tokenizers/{dataset}' if dataset == 'punkt' else f'corpora/{dataset}')
+            print(f"✓ {dataset} already available")
+        except LookupError:
+            try:
+                print(f"Downloading {dataset}...")
+                nltk.download(dataset, quiet=True)
+                print(f"✓ Downloaded {dataset}")
+            except Exception as e:
+                print(f"⚠️ Failed to download {dataset}: {e}")
 
-for dataset in nltk_datasets:
-    try:
-        nltk.data.find(f'tokenizers/{dataset}')
-        print(f"✓ {dataset} already available")
-    except LookupError:
-        print(f"Downloading {dataset}...")
-        nltk.download(dataset, quiet=True)
-        print(f"✓ Downloaded {dataset}")
+# Run the download function
+download_nltk_data()
 
 
 # Set page configuration
@@ -90,17 +103,39 @@ st.markdown("""
 lemmatizer = WordNetLemmatizer()
 stop_words = set(stopwords.words('english'))
 
-# Text preprocessing function
 def preprocess_text(text):
-    # Convert to lowercase
-    text = text.lower()
-    # Remove special characters and digits
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
-    # Tokenize
-    tokens = word_tokenize(text)
-    # Remove stopwords and lemmatize
-    tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words]
-    return ' '.join(tokens)
+    """
+    Clean and preprocess text with robust error handling
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    
+    try:
+        # Convert to lowercase
+        text = text.lower()
+        # Remove special characters and digits
+        text = re.sub(r'[^a-zA-Z\s]', '', text)
+        
+        # Tokenize with fallback
+        try:
+            tokens = word_tokenize(text)
+        except:
+            # Fallback: simple space-based tokenization
+            tokens = text.split()
+        
+        # Remove stopwords and lemmatize if available
+        if 'stop_words' in globals() and stop_words and 'lemmatizer' in globals():
+            tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words]
+        else:
+            # Basic filtering without lemmatization
+            tokens = [word for word in tokens if len(word) > 2]
+        
+        return ' '.join(tokens)
+        
+    except Exception as e:
+        print(f"Error in preprocessing: {e}")
+        # Fallback: return original text with basic cleaning
+        return text.lower().strip()
 
 # Twitter API
 #bearer_token = st.secrets["TWITTER_BEARER_TOKEN"]
@@ -114,6 +149,7 @@ reddit_client_secret = st.secrets.get("REDDIT_CLIENT_SECRET", "")
 newsapi_key = st.secrets.get("NEWSAPI_KEY", "")
 
 api_keys_configured = any([bearer_token, reddit_client_id, newsapi_key])
+
 # Load or train model
 @st.cache_resource
 def load_or_train_model():
@@ -239,59 +275,271 @@ with tab1:
         else:
             st.warning("Please enter some text to analyze.")
 
+def load_file_data(uploaded_file):
+    """
+    Load data from various file formats with comprehensive error handling
+    """
+    try:
+        file_extension = Path(uploaded_file.name).suffix.lower()
+        
+        # Read file content
+        file_content = uploaded_file.read()
+        
+        if file_extension == '.csv':
+            # Try different encodings for CSV
+            for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                try:
+                    df = pd.read_csv(io.StringIO(file_content.decode(encoding)))
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise ValueError("Could not decode CSV file with any supported encoding")
+                
+        elif file_extension in ['.xlsx', '.xls']:
+            df = pd.read_excel(io.BytesIO(file_content))
+            
+        elif file_extension == '.json':
+            data = json.loads(file_content.decode('utf-8'))
+            if isinstance(data, list):
+                df = pd.DataFrame(data)
+            elif isinstance(data, dict):
+                # Try to find text data in the JSON structure
+                if 'data' in data and isinstance(data['data'], list):
+                    df = pd.DataFrame(data['data'])
+                else:
+                    df = pd.DataFrame([data])
+            else:
+                raise ValueError("JSON format not supported")
+                
+        elif file_extension == '.txt':
+            # Handle plain text files
+            text_content = file_content.decode('utf-8')
+            lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+            df = pd.DataFrame({'text': lines})
+            
+        else:
+            raise ValueError(f"Unsupported file format: {file_extension}")
+            
+        return df, None
+        
+    except Exception as e:
+        return None, f"Error loading file: {str(e)}"
+
+def validate_and_prepare_data(df):
+    """
+    Validate and prepare data for sentiment analysis
+    """
+    try:
+        # Check if dataframe is empty
+        if df.empty:
+            return None, "The uploaded file is empty"
+            
+        # Look for text column with various possible names
+        text_columns = ['text', 'content', 'message', 'review', 'comment', 'description']
+        text_col = None
+        
+        for col in text_columns:
+            if col in df.columns:
+                text_col = col
+                break
+                
+        if text_col is None:
+            # If no standard text column found, let user select
+            available_cols = [col for col in df.columns if df[col].dtype == 'object']
+            if available_cols:
+                return df, f"No standard text column found. Available text columns: {', '.join(available_cols)}"
+            else:
+                return None, "No text columns found in the file"
+                
+        # Rename the text column to 'text' for consistency
+        if text_col != 'text':
+            df = df.rename(columns={text_col: 'text'})
+            
+        # Remove rows with missing text
+        initial_count = len(df)
+        df = df.dropna(subset=['text'])
+        df = df[df['text'].astype(str).str.strip() != '']
+        
+        if len(df) == 0:
+            return None, "No valid text data found after cleaning"
+            
+        if len(df) < initial_count:
+            st.info(f"Removed {initial_count - len(df)} rows with missing or empty text")
+            
+        return df, None
+        
+    except Exception as e:
+        return None, f"Error validating data: {str(e)}"
+
 with tab2:
     st.markdown('<h2 class="sub-header">Batch Analysis</h2>', unsafe_allow_html=True)
     
-    uploaded_file = st.file_uploader("Upload a CSV file with a 'text' column", type="csv")
+    st.info("📁 **Supported file formats:** CSV, Excel (.xlsx, .xls), JSON, TXT")
+    
+    uploaded_file = st.file_uploader(
+        "Upload a file with text data", 
+        type=["csv", "xlsx", "xls", "json", "txt"],
+        help="The file should contain a column with text data (e.g., 'text', 'content', 'review', etc.)"
+    )
     
     if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-        
-        if 'text' not in df.columns:
-            st.error("The uploaded file must contain a 'text' column.")
-        else:
-            st.write("Preview of uploaded data:")
-            st.dataframe(df.head())
-            
-            if st.button("Analyze Batch"):
-                with st.spinner("Analyzing sentiments..."):
-                    # Preprocess and predict
-                    df['cleaned_text'] = df['text'].apply(preprocess_text)
-                    text_vectors = vectorizer.transform(df['cleaned_text'])
-                    predictions = model.predict(text_vectors)
-                    probabilities = model.predict_proba(text_vectors).max(axis=1)
+        try:
+            with st.spinner("Loading file..."):
+                df, load_error = load_file_data(uploaded_file)
+                
+            if load_error:
+                st.error(f"❌ {load_error}")
+                st.info("💡 **Tips:**\n- Ensure your file is not corrupted\n- Check file encoding (UTF-8 recommended)\n- Verify file format is supported")
+            else:
+                # Validate and prepare data
+                df, validation_error = validate_and_prepare_data(df)
+                
+                if validation_error:
+                    st.warning(f"⚠️ {validation_error}")
                     
-                    df['predicted_sentiment'] = predictions
-                    df['confidence'] = probabilities
+                    # Show column selection if needed
+                    if "Available text columns" in validation_error:
+                        st.write("**Please select the text column to analyze:**")
+                        available_cols = [col for col in df.columns if df[col].dtype == 'object']
+                        selected_col = st.selectbox("Select text column:", available_cols)
+                        
+                        if st.button("Use Selected Column"):
+                            df = df.rename(columns={selected_col: 'text'})
+                            df, validation_error = validate_and_prepare_data(df)
+                            
+                if not validation_error and df is not None:
+                    # Show file info
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("📄 File Type", Path(uploaded_file.name).suffix.upper())
+                    with col2:
+                        st.metric("📊 Total Rows", len(df))
+                    with col3:
+                        st.metric("📝 Text Column", "text")
                     
-                    # Display results
-                    st.subheader("Analysis Results")
-                    st.dataframe(df[['text', 'predicted_sentiment', 'confidence']])
+                    st.write("**Preview of uploaded data:**")
+                    st.dataframe(df.head(10))
                     
-                    # Download results
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Results as CSV",
-                        data=csv,
-                        file_name="sentiment_analysis_results.csv",
-                        mime="text/csv"
-                    )
+                    # Show data statistics
+                    with st.expander("📈 Data Statistics"):
+                        text_lengths = df['text'].astype(str).str.len()
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Avg Text Length", f"{text_lengths.mean():.0f} chars")
+                        with col2:
+                            st.metric("Min Text Length", f"{text_lengths.min()} chars")
+                        with col3:
+                            st.metric("Max Text Length", f"{text_lengths.max()} chars")
+                        with col4:
+                            st.metric("Empty Texts", sum(text_lengths == 0))
                     
-                    # Visualize distribution
-                    sentiment_counts = df['predicted_sentiment'].value_counts()
-                    
-                    fig1, ax1 = plt.subplots()
-                    ax1.pie(sentiment_counts.values, labels=sentiment_counts.index, 
-                            autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c', '#f39c12'])
-                    ax1.set_title('Sentiment Distribution')
-                    st.pyplot(fig1)
-                    
-                    fig2 = px.bar(x=sentiment_counts.index, y=sentiment_counts.values,
-                                 color=sentiment_counts.index,
-                                 color_discrete_map={'positive': '#2ecc71', 'negative': '#e74c3c', 'neutral': '#f39c12'},
-                                 labels={'x': 'Sentiment', 'y': 'Count'},
-                                 title='Sentiment Counts')
-                    st.plotly_chart(fig2)
+                    if st.button("🚀 Analyze Batch", type="primary"):
+                        try:
+                            with st.spinner("Analyzing sentiments... This may take a moment."):
+                                # Use the improved analysis function
+                                results_df = analyze_multiple_texts(df['text'].tolist())
+                                
+                                # Merge results with original data
+                                df_results = df.copy()
+                                df_results['predicted_sentiment'] = results_df['sentiment']
+                                df_results['confidence'] = results_df['confidence']
+                                df_results['errors'] = results_df['error']
+                                
+                                # Show error summary
+                                error_count = sum(df_results['errors'].notna())
+                                if error_count > 0:
+                                    st.warning(f"⚠️ {error_count} texts had processing errors")
+                                    
+                                    with st.expander("View Errors"):
+                                        error_df = df_results[df_results['errors'].notna()][['text', 'errors']]
+                                        st.dataframe(error_df)
+                                
+                                # Display results
+                                st.subheader("📊 Analysis Results")
+                                
+                                # Filter out error rows for display
+                                valid_results = df_results[df_results['errors'].isna()]
+                                
+                                if len(valid_results) > 0:
+                                    st.dataframe(
+                                        valid_results[['text', 'predicted_sentiment', 'confidence']],
+                                        use_container_width=True
+                                    )
+                                    
+                                    # Download results
+                                    csv = df_results.to_csv(index=False)
+                                    st.download_button(
+                                        label="📥 Download Results as CSV",
+                                        data=csv,
+                                        file_name=f"sentiment_analysis_results_{uploaded_file.name.split('.')[0]}.csv",
+                                        mime="text/csv"
+                                    )
+                                    
+                                    # Visualizations
+                                    sentiment_counts = valid_results['predicted_sentiment'].value_counts()
+                                    
+                                    # Metrics
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    with col1:
+                                        st.metric("✅ Processed", len(valid_results))
+                                    with col2:
+                                        pos_pct = (sentiment_counts.get('positive', 0) / len(valid_results)) * 100
+                                        st.metric("😊 Positive", f"{pos_pct:.1f}%")
+                                    with col3:
+                                        neg_pct = (sentiment_counts.get('negative', 0) / len(valid_results)) * 100
+                                        st.metric("😞 Negative", f"{neg_pct:.1f}%")
+                                    with col4:
+                                        neu_pct = (sentiment_counts.get('neutral', 0) / len(valid_results)) * 100
+                                        st.metric("😐 Neutral", f"{neu_pct:.1f}%")
+                                    
+                                    # Charts
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        fig1, ax1 = plt.subplots(figsize=(8, 6))
+                                        colors = {'positive': '#2ecc71', 'negative': '#e74c3c', 'neutral': '#f39c12'}
+                                        pie_colors = [colors.get(sentiment, '#95a5a6') for sentiment in sentiment_counts.index]
+                                        ax1.pie(sentiment_counts.values, labels=sentiment_counts.index, 
+                                                autopct='%1.1f%%', colors=pie_colors, startangle=90)
+                                        ax1.set_title('Sentiment Distribution')
+                                        st.pyplot(fig1)
+                                    
+                                    with col2:
+                                        fig2 = px.bar(
+                                            x=sentiment_counts.index, 
+                                            y=sentiment_counts.values,
+                                            color=sentiment_counts.index,
+                                            color_discrete_map={'positive': '#2ecc71', 'negative': '#e74c3c', 'neutral': '#f39c12'},
+                                            labels={'x': 'Sentiment', 'y': 'Count'},
+                                            title='Sentiment Counts'
+                                        )
+                                        fig2.update_layout(showlegend=False)
+                                        st.plotly_chart(fig2, use_container_width=True)
+                                    
+                                    # Confidence distribution
+                                    st.subheader("🎯 Confidence Analysis")
+                                    fig3 = px.histogram(
+                                        valid_results, 
+                                        x='confidence', 
+                                        color='predicted_sentiment',
+                                        color_discrete_map={'positive': '#2ecc71', 'negative': '#e74c3c', 'neutral': '#f39c12'},
+                                        title='Confidence Score Distribution',
+                                        nbins=20
+                                    )
+                                    st.plotly_chart(fig3, use_container_width=True)
+                                    
+                                else:
+                                    st.error("❌ No valid results to display. All texts had processing errors.")
+                                    
+                        except Exception as e:
+                            st.error(f"❌ Error during analysis: {str(e)}")
+                            st.error(f"**Error details:** {traceback.format_exc()}")
+                            
+        except Exception as e:
+            st.error(f"❌ Unexpected error: {str(e)}")
+            st.error(f"**Error details:** {traceback.format_exc()}")
+            st.info("💡 **Troubleshooting:**\n- Try a different file format\n- Check if file is corrupted\n- Ensure file contains text data")
 
 with tab3:
     st.markdown('<h2 class="sub-header">Model Information</h2>', unsafe_allow_html=True)
